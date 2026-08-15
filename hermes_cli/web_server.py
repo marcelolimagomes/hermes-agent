@@ -433,6 +433,36 @@ _LOOPBACK_HOST_VALUES: frozenset = frozenset({
 })
 
 
+def _host_without_port(host_header: str) -> str:
+    """Return a normalized host name without an optional port suffix."""
+    h = host_header.strip()
+    if h.startswith("["):
+        close = h.find("]")
+        if close != -1:
+            return h[1:close].lower()
+        return h.strip("[]").lower()
+    return (h.rsplit(":", 1)[0] if ":" in h else h).lower()
+
+
+def _trusted_proxy_hosts() -> frozenset[str]:
+    """Return explicitly configured reverse-proxy Host aliases.
+
+    Loopback remains the bind boundary. This narrow allowlist exists for a
+    local reverse proxy/tunnel that preserves the public hostname while
+    forwarding to the loopback dashboard. It is opt-in and never accepts a
+    wildcard.
+    """
+    raw = os.environ.get("HERMES_DASHBOARD_TRUSTED_PROXY_HOSTS", "")
+    hosts = {
+        _host_without_port(value)
+        for value in raw.split(",")
+        if value.strip()
+    }
+    return frozenset(
+        host for host in hosts if host and host not in {"*", "0.0.0.0", "::"}
+    )
+
+
 def should_require_auth(host: str, allow_public: bool = False) -> bool:
     """Return True iff the dashboard auth gate must be active.
 
@@ -466,23 +496,8 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     """
     if not host_header:
         return False
-    # Strip port suffix. IPv6 addresses use bracket notation:
-    #   [::1]         — no port
-    #   [::1]:9119    — with port
-    # Plain hosts/v4:
-    #   localhost:9119
-    #   127.0.0.1:9119
-    h = host_header.strip()
-    if h.startswith("["):
-        # IPv6 bracketed — port (if any) follows "]:"
-        close = h.find("]")
-        if close != -1:
-            host_only = h[1:close]  # strip brackets
-        else:
-            host_only = h.strip("[]")
-    else:
-        host_only = h.rsplit(":", 1)[0] if ":" in h else h
-    host_only = host_only.lower()
+    # Strip an optional port suffix, including bracketed IPv6 notation.
+    host_only = _host_without_port(host_header)
 
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
@@ -493,7 +508,7 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
-        return host_only in _LOOPBACK_HOST_VALUES
+        return host_only in (_LOOPBACK_HOST_VALUES | _trusted_proxy_hosts())
 
     # Explicit non-loopback bind: require exact host match
     return host_only == bound_lc
