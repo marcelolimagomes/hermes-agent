@@ -230,6 +230,98 @@ def test_registered_is_not_promoted():
     assert "claude-code-cli" not in canonical
 
 
+# --- ponte de aprovação e despacho do runtime ---------------------------------
+
+def test_approval_bridge_denies_without_any_mechanism():
+    # Sem hook e sem allowlist, a lane fica sem supervisor. Permitir aqui
+    # tornaria o turno irrestrito num runtime que nao tem sandbox.
+    from agent.claude_code_runtime import make_claude_approval_bridge
+
+    bridge = make_claude_approval_bridge(type("A", (), {})())
+    assert bridge("Bash", {"command": "ls"}, "hook_callback").allow is False
+
+
+def test_approval_bridge_uses_the_hermes_hook():
+    from agent.claude_code_runtime import make_claude_approval_bridge
+
+    class Agent:
+        def request_tool_approval(self, name, _input):
+            return name == "Bash"
+
+    bridge = make_claude_approval_bridge(Agent())
+    assert bridge("Bash", {}, "hook_callback").allow is True
+    assert bridge("Write", {}, "hook_callback").allow is False
+
+
+def test_approval_hook_that_raises_becomes_a_denial():
+    from agent.claude_code_runtime import make_claude_approval_bridge
+
+    class Agent:
+        def request_tool_approval(self, name, _input):
+            raise RuntimeError("hook bug")
+
+    assert make_claude_approval_bridge(Agent())("Bash", {}, "hook_callback").allow is False
+
+
+def test_non_boolean_verdict_is_ambiguous_and_denies():
+    from agent.claude_code_runtime import make_claude_approval_bridge
+
+    class Agent:
+        def request_tool_approval(self, name, _input):
+            return "sure"
+
+    assert make_claude_approval_bridge(Agent())("Bash", {}, "hook_callback").allow is False
+
+
+def test_allowlist_is_honoured_when_no_hook_exists():
+    from agent.claude_code_runtime import make_claude_approval_bridge
+
+    agent = type("A", (), {"allowed_tools": {"Bash"}})()
+    bridge = make_claude_approval_bridge(agent)
+    assert bridge("Bash", {}, "can_use_tool").allow is True
+    assert bridge("Write", {}, "can_use_tool").allow is False
+
+
+def test_api_mode_is_accepted_by_agent_init():
+    # Sem isto o turno nao e despachado: o provider fica registrado e inerte.
+    import inspect
+
+    from agent import agent_init
+
+    src = inspect.getsource(agent_init)
+    assert '"claude_code_cli"' in src, "agent_init nao aceita o api_mode"
+
+
+def test_conversation_loop_dispatches_the_runtime():
+    import inspect
+
+    from agent import conversation_loop
+
+    src = inspect.getsource(conversation_loop)
+    assert 'agent.api_mode == "claude_code_cli"' in src
+    assert "run_claude_code_turn" in src
+
+
+def test_provider_never_falls_through_to_the_native_api():
+    # claude-code-cli tem de derivar claude_code_cli, JAMAIS anthropic_messages,
+    # que e o caminho da API nativa proibido pelo ADR-020.
+    import inspect
+
+    from agent import agent_init
+
+    src = inspect.getsource(agent_init)
+    idx = src.index('agent.provider == "claude-code-cli"')
+    branch = src[idx: idx + 400].split("elif")[0]
+    # Comentarios sao descartados: o comentario deste proprio ramo explica por
+    # que anthropic_messages e proibido, e olhar o texto cru reprovaria o
+    # codigo correto por causa da sua propria justificativa.
+    code = "\n".join(
+        line for line in branch.splitlines() if not line.strip().startswith("#")
+    )
+    assert 'agent.api_mode = "claude_code_cli"' in code
+    assert "anthropic_messages" not in code
+
+
 def main() -> int:
     tests = [(n, o) for n, o in sorted(globals().items())
              if n.startswith("test_") and callable(o)]

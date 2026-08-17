@@ -669,8 +669,13 @@ def init_agent(
     agent._credential_pool = credential_pool
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
-    if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server"}:
+    if api_mode in {"chat_completions", "codex_responses", "anthropic_messages",
+                "bedrock_converse", "codex_app_server", "claude_code_cli"}:
         agent.api_mode = api_mode
+    elif agent.provider == "claude-code-cli":
+        # Provider conduzido por CLI local. NUNCA cai em anthropic_messages:
+        # esse caminho vai para a API nativa, que e exatamente o proibido.
+        agent.api_mode = "claude_code_cli"
     elif agent.provider == "openai-codex":
         agent.api_mode = "codex_responses"
     elif agent.provider in {"xai", "xai-oauth"}:

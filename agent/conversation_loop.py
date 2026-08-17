@@ -1817,6 +1817,22 @@ def run_conversation(
     # all run inside Codex). Default Hermes path is bypassed entirely.
     # See agent/transports/codex_app_server_session.py for the adapter
     # and references/codex-app-server-runtime.md for the rationale.
+    # Mesmo desenho do codex_app_server, outro fornecedor: o turno inteiro vai
+    # para uma CLI local. Diferenca material a registrar: esta lane NAO tem
+    # sandbox equivalente ao sandbox_mode do Codex, entao a ponte de aprovacao
+    # e a unica contencao. Ver agent/claude_code_runtime.py.
+    if agent.api_mode == "claude_code_cli":
+        from agent.claude_code_runtime import run_claude_code_turn
+
+        return run_claude_code_turn(
+            agent,
+            user_message=user_message,
+            original_user_message=original_user_message,
+            messages=messages,
+            effective_task_id=effective_task_id,
+            should_review_memory=_should_review_memory,
+        )
+
     if agent.api_mode == "codex_app_server":
         return agent._run_codex_app_server_turn(
             user_message=user_message,
