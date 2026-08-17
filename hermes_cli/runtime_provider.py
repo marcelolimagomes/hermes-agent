@@ -403,6 +403,14 @@ _VALID_API_MODES = {
     # `model.openai_runtime == "codex_app_server"` AND provider in
     # {"openai", "openai-codex"}. Default is unchanged.
     "codex_app_server",
+    # Optional opt-in: hand the turn to a local `claude` CLI subprocess over
+    # stream-json. Same shape as codex_app_server, different vendor. Gated
+    # behind provider == "claude-code-cli". ADR-020: registered, not promoted.
+    #
+    # Security note carried from the measurement: the CLI has no sandbox_mode
+    # equivalent. Containment is the PreToolUse hook, which is a policy gate
+    # over a live supervisor, not an isolation boundary.
+    "claude_code_cli",
 }
 
 

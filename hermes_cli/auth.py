@@ -134,6 +134,9 @@ MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
 DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
 DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
+# Marker base URL: the transport is a local subprocess, so there is no HTTP
+# endpoint. Mirrors the acp:// convention already used for copilot-acp.
+DEFAULT_CLAUDE_CODE_CLI_BASE_URL = "cli://claude-code"
 DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
 DEFAULT_ACTUAL_BASE_URL = "https://api.actual.inc/v1"
 DEFAULT_ACTUAL_LOCAL_BASE_URL = "http://127.0.0.1:8080/v1"
@@ -304,6 +307,18 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
+    ),
+    # Claude Code driven as a LOCAL CLI, never as the native Anthropic API.
+    # Authorized by ADR-020 of the taskblu-co-working-assistant appliance:
+    # registered, NOT promoted — no lane selects it by this entry alone.
+    # Measured on that host: the Anthropic API refuses Hermes as a third-party
+    # app (HTTP 400, extra usage) while the CLI works on the subscription plan.
+    "claude-code-cli": ProviderConfig(
+        id="claude-code-cli",
+        name="Claude Code (local CLI)",
+        auth_type="external_process",
+        inference_base_url=DEFAULT_CLAUDE_CODE_CLI_BASE_URL,
+        base_url_env_var="CLAUDE_CODE_CLI_BASE_URL",
     ),
     "gemini": ProviderConfig(
         id="gemini",
