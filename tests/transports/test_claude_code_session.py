@@ -241,45 +241,8 @@ def test_approval_bridge_denies_without_any_mechanism():
     assert bridge("Bash", {"command": "ls"}, "hook_callback").allow is False
 
 
-def test_approval_bridge_uses_the_hermes_hook():
-    from agent.claude_code_runtime import make_claude_approval_bridge
-
-    class Agent:
-        def request_tool_approval(self, name, _input):
-            return name == "Bash"
-
-    bridge = make_claude_approval_bridge(Agent())
-    assert bridge("Bash", {}, "hook_callback").allow is True
-    assert bridge("Write", {}, "hook_callback").allow is False
 
 
-def test_approval_hook_that_raises_becomes_a_denial():
-    from agent.claude_code_runtime import make_claude_approval_bridge
-
-    class Agent:
-        def request_tool_approval(self, name, _input):
-            raise RuntimeError("hook bug")
-
-    assert make_claude_approval_bridge(Agent())("Bash", {}, "hook_callback").allow is False
-
-
-def test_non_boolean_verdict_is_ambiguous_and_denies():
-    from agent.claude_code_runtime import make_claude_approval_bridge
-
-    class Agent:
-        def request_tool_approval(self, name, _input):
-            return "sure"
-
-    assert make_claude_approval_bridge(Agent())("Bash", {}, "hook_callback").allow is False
-
-
-def test_allowlist_is_honoured_when_no_hook_exists():
-    from agent.claude_code_runtime import make_claude_approval_bridge
-
-    agent = type("A", (), {"allowed_tools": {"Bash"}})()
-    bridge = make_claude_approval_bridge(agent)
-    assert bridge("Bash", {}, "can_use_tool").allow is True
-    assert bridge("Write", {}, "can_use_tool").allow is False
 
 
 def test_api_mode_is_accepted_by_agent_init():
@@ -348,6 +311,44 @@ def test_provider_routing_never_yields_anthropic_messages():
     code = "\n".join(l for l in branch.splitlines() if not l.strip().startswith("#"))
     assert '"api_mode": "claude_code_cli"' in code
     assert "anthropic_messages" not in code.split('if provider == "copilot-acp"')[0]
+
+def test_bridge_uses_the_real_hermes_callback(monkeypatch=None):
+    # A versao anterior deste bridge inventava `request_tool_approval`, que nao
+    # existe em lugar nenhum do Hermes: TODA ferramenta era negada e a lane
+    # parecia segura enquanto era incapaz de trabalhar. O mecanismo real e
+    # tools.terminal_tool._get_approval_callback, o mesmo do codex_runtime.
+    import tools.terminal_tool as tt
+    from agent.claude_code_runtime import make_claude_approval_bridge
+
+    calls = []
+    tt.set_approval_callback(lambda prompt: (calls.append(prompt), True)[1])
+    try:
+        bridge = make_claude_approval_bridge(type("A", (), {})())
+        decision = bridge("Bash", {"command": "ls -1"}, "hook_callback")
+    finally:
+        tt.set_approval_callback(None)
+    assert decision.allow is True
+    assert calls and "Bash" in calls[0] and "ls -1" in calls[0]
+
+
+def test_bridge_fails_closed_without_ui_or_bypass():
+    from agent.claude_code_runtime import make_claude_approval_bridge
+
+    assert make_claude_approval_bridge(type("A", (), {})())("Bash", {}, "hook_callback").allow is False
+
+
+def test_callback_that_raises_denies():
+    import tools.terminal_tool as tt
+    from agent.claude_code_runtime import make_claude_approval_bridge
+
+    def boom(_prompt):
+        raise RuntimeError("ui gone")
+
+    tt.set_approval_callback(boom)
+    try:
+        assert make_claude_approval_bridge(type("A", (), {})())("Bash", {}, "hook_callback").allow is False
+    finally:
+        tt.set_approval_callback(None)
 
 
 def main() -> int:

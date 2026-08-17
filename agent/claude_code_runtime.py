@@ -31,14 +31,27 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _approval_prompt(tool_name: str, tool_input: Any) -> str:
+    """Human-readable request for Hermes' approval prompt."""
+    detail = ""
+    if isinstance(tool_input, dict):
+        detail = str(tool_input.get("command") or tool_input.get("file_path") or "")
+    elif tool_input:
+        detail = str(tool_input)
+    detail = detail.strip()
+    if len(detail) > 200:
+        detail = detail[:200] + "…"
+    return f"Claude Code lane wants to run {tool_name}" + (f": {detail}" if detail else "")
+
+
 def make_claude_approval_bridge(agent) -> Callable[[Optional[str], Any, str], Any]:
     """Build the policy callable the transport consults before each tool.
 
     Resolution order, from most to least authoritative:
 
-      1. An explicit Hermes approval hook, when the host exposes one.
-      2. The agent's own allowlist of tools, when configured.
-      3. Deny.
+      1. Hermes' approval bypass (`approvals.mode: off`, /yolo, --yolo).
+      2. Hermes' per-thread approval callback, the same one codex_runtime uses.
+      3. Deny — gateway and cron have no UI to prompt through.
 
     Never "allow by default": on this runtime the gate is the whole boundary.
     """
@@ -49,36 +62,52 @@ def make_claude_approval_bridge(agent) -> Callable[[Optional[str], Any, str], An
         if not name:
             return GateDecision(allow=False, reason="tool without a name")
 
-        # 1. Host-provided approval hook. Signature is kept loose on purpose:
-        #    Hermes exposes approval through more than one shape across
-        #    versions, and a TypeError here must not become an allow.
-        hook = getattr(agent, "request_tool_approval", None)
-        if callable(hook):
-            try:
-                verdict = hook(name, tool_input)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("claude_code_cli: approval hook raised: %s", exc)
-                return GateDecision(allow=False, reason=f"approval hook raised: {type(exc).__name__}")
-            if isinstance(verdict, bool):
+        # 1. Explicit approval bypass, exactly as the Codex runtime honours it:
+        #    `approvals.mode: off`, the /yolo session toggle, --yolo or
+        #    HERMES_YOLO_MODE. When the operator has opted out of Hermes
+        #    approvals, double-gating here would make the lane unusable while
+        #    adding nothing — the same reasoning codex_runtime documents.
+        try:
+            from tools.approval import is_approval_bypass_active
+
+            if is_approval_bypass_active():
                 return GateDecision(
-                    allow=verdict,
-                    reason=f"hermes approval hook via {channel}",
+                    allow=True, reason=f"hermes approval bypass active ({channel})"
                 )
-            # A non-boolean verdict is ambiguous, and ambiguity resolves to deny.
-            return GateDecision(allow=False, reason="approval hook returned a non-boolean verdict")
+        except Exception:  # noqa: BLE001
+            logger.debug("claude_code_cli: approval-bypass lookup failed", exc_info=True)
 
-        # 2. Explicit allowlist on the agent, when the deployment configured one.
-        allowed = getattr(agent, "allowed_tools", None)
-        if isinstance(allowed, (set, list, tuple)) and allowed:
-            if name in set(allowed):
-                return GateDecision(allow=True, reason=f"tool in agent allowlist via {channel}")
-            return GateDecision(allow=False, reason=f"tool {name!r} is not in the agent allowlist")
+        # 2. Hermes' standard per-thread approval callback, installed by the CLI
+        #    thread. This is the SAME mechanism the Codex runtime uses; an
+        #    earlier version of this bridge invented `request_tool_approval`,
+        #    which exists nowhere, so every tool was denied and the lane looked
+        #    safe while being unable to do any work.
+        try:
+            from tools.terminal_tool import _get_approval_callback
 
-        # 3. No approval mechanism configured. Deny, and say so — a lane that
-        #    silently allowed here would be unsupervised, not permissive.
+            approval_callback = _get_approval_callback()
+        except Exception:  # noqa: BLE001
+            approval_callback = None
+
+        if callable(approval_callback):
+            try:
+                verdict = approval_callback(_approval_prompt(name, tool_input))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("claude_code_cli: approval callback raised: %s", exc)
+                return GateDecision(
+                    allow=False, reason=f"approval callback raised: {type(exc).__name__}"
+                )
+            allowed = verdict is True or str(verdict).strip().lower() in {"y", "yes", "approve", "allow"}
+            return GateDecision(
+                allow=allowed, reason=f"hermes approval callback via {channel}"
+            )
+
+        # 3. No UI and no bypass: gateway and cron contexts have nowhere to
+        #    surface the prompt. Fail closed, which is what the Codex runtime
+        #    does in the same situation.
         return GateDecision(
             allow=False,
-            reason="no Hermes approval mechanism is configured for the claude_code_cli runtime",
+            reason="no Hermes approval UI and no bypass: failing closed as codex_app_server does",
         )
 
     return bridge
