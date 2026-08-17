@@ -350,6 +350,47 @@ def test_callback_that_raises_denies():
     finally:
         tt.set_approval_callback(None)
 
+def test_mcp_servers_are_carried_into_the_lane():
+    # Sem isto a lane nao tem Paperclip nem ai-memory: o orquestrador nao
+    # conseguiria ler a issue nem postar resultado. O runtime Codex recebe
+    # essas tools pelo dispatch do proprio Hermes; este entrega o turno inteiro
+    # a CLI, entao os servidores precisam ir junto.
+    import json
+
+    from agent.claude_code_runtime import _mcp_config_from_profile, _allowed_mcp_tools
+
+    agent = type("A", (), {"mcp_servers": {
+        "paperclip": {"command": "node", "args": ["stdio.js"],
+                      "tools": {"include": ["listIssues"]}},
+        "ai-memory": {"url": "https://example.invalid/mcp",
+                      "headers": {"Authorization": "Bearer ${AI_MEMORY_AUTH_TOKEN}"},
+                      "tools": {"include": ["memory_status"]}},
+    }})()
+    cfg = json.load(open(_mcp_config_from_profile(agent)))
+    assert set(cfg["mcpServers"]) == {"paperclip", "ai-memory"}
+    assert cfg["mcpServers"]["ai-memory"]["type"] == "http"
+    # A credencial permanece REFERENCIA. Materializa-la escreveria o segredo
+    # num arquivo temporario, que e exatamente o que este produto proibe.
+    assert "${AI_MEMORY_AUTH_TOKEN}" in cfg["mcpServers"]["ai-memory"]["headers"]["Authorization"]
+    assert _allowed_mcp_tools(agent) == ["mcp__paperclip__listIssues", "mcp__ai-memory__memory_status"]
+
+
+def test_mcp_config_permissions_are_owner_only():
+    import os
+    import stat
+
+    from agent.claude_code_runtime import _mcp_config_from_profile
+
+    agent = type("A", (), {"mcp_servers": {"x": {"command": "true", "tools": {"include": []}}}})()
+    path = _mcp_config_from_profile(agent)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_no_mcp_servers_yields_no_config():
+    from agent.claude_code_runtime import _mcp_config_from_profile
+
+    assert _mcp_config_from_profile(type("A", (), {})()) is None
+
 
 def main() -> int:
     tests = [(n, o) for n, o in sorted(globals().items())

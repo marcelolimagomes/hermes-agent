@@ -113,6 +113,74 @@ def make_claude_approval_bridge(agent) -> Callable[[Optional[str], Any, str], An
     return bridge
 
 
+def _mcp_config_from_profile(agent) -> Optional[str]:
+    """Translate Hermes' configured MCP servers into a Claude CLI mcp-config.
+
+    Without this the lane has NO Paperclip and NO ai-memory tools: the
+    orchestrator could not read its issue, post results, or reach memory. The
+    Codex runtime gets these through Hermes' own tool dispatch; this runtime
+    hands the whole turn to the CLI, so the servers must be handed over too.
+
+    Only the allowlisted tools are carried across. The lane allowlist is a
+    contract (config/contracts/mcp-lanes.toml in the appliance), and widening
+    it here would move a security boundary as a side effect of a translation.
+    """
+    import json
+    import os
+    import tempfile
+
+    servers = getattr(agent, "mcp_servers", None)
+    if not isinstance(servers, dict) or not servers:
+        return None
+
+    translated: dict[str, Any] = {}
+    for name, spec in servers.items():
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("command"):
+            entry: dict[str, Any] = {
+                "command": spec["command"],
+                "args": list(spec.get("args") or []),
+            }
+            if isinstance(spec.get("env"), dict):
+                entry["env"] = dict(spec["env"])
+        elif spec.get("url"):
+            # Claude Code speaks http/sse MCP; Hermes stores the URL plus any
+            # headers, which is where the ai-memory bearer lives. The value is
+            # an ${ENV} reference in the profile and stays one here: no
+            # credential is ever materialised into this file.
+            entry = {"type": "http", "url": spec["url"]}
+            if isinstance(spec.get("headers"), dict):
+                entry["headers"] = dict(spec["headers"])
+        else:
+            continue
+        translated[name] = entry
+
+    if not translated:
+        return None
+
+    handle = tempfile.NamedTemporaryFile(
+        "w", suffix=".mcp.json", prefix="hermes-claude-", delete=False
+    )
+    with handle:
+        json.dump({"mcpServers": translated}, handle)
+    os.chmod(handle.name, 0o600)
+    return handle.name
+
+
+def _allowed_mcp_tools(agent) -> list[str]:
+    """The exact tool names the lane may call, in Claude's mcp__ namespace."""
+    names: list[str] = []
+    servers = getattr(agent, "mcp_servers", None) or {}
+    if not isinstance(servers, dict):
+        return names
+    for server, spec in servers.items():
+        include = ((spec or {}).get("tools") or {}).get("include") or []
+        for tool in include:
+            names.append(f"mcp__{server}__{tool}")
+    return names
+
+
 def _project_messages(turn, messages: List[Dict[str, Any]]) -> int:
     """Append the turn's projected messages, returning how many were added."""
     added = 0
@@ -165,11 +233,18 @@ def run_claude_code_turn(
         # One session per AIAgent, reused across turns: the CLI keeps context
         # between turns in the same process, which is why this transport is
         # session-persistent rather than process-per-turn.
+        mcp_config = _mcp_config_from_profile(agent)
+        mcp_tools = _allowed_mcp_tools(agent)
+        # The tool surface must carry the MCP tools explicitly: an empty or
+        # Bash-only surface makes the orchestrator unable to touch Paperclip.
+        tools = ",".join(["Bash", "Read", "Write", "Edit", *mcp_tools]) or "Bash"
         session = ClaudeCodeSession(
             claude_bin=getattr(agent, "claude_bin", "claude") or "claude",
             identity=Identity.new(),
             cwd=getattr(agent, "workspace", None) or None,
+            tools=tools,
             model=getattr(agent, "model", None),
+            mcp_config=mcp_config,
             policy=make_claude_approval_bridge(agent),
             register_hook=True,
         )
