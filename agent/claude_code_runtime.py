@@ -113,6 +113,112 @@ def make_claude_approval_bridge(agent) -> Callable[[Optional[str], Any, str], An
     return bridge
 
 
+def _resolve_mcp_env(servers: dict) -> dict:
+    """Resolve the ${VAR} references the MCP specs need, for the SPAWN ENV.
+
+    The Paperclip stdio server authenticates through environment variables that
+    the profile stores as ${VAR} references. Hermes resolves them for its own
+    MCP client; a CLI-driven lane spawns the server itself, so the values have
+    to reach it another way.
+
+    They go into the child process environment, never into the mcp-config file:
+    a file on disk would be a materialised secret, an env var of a child we
+    spawn is the same channel Hermes already uses.
+    """
+    import os
+    import re
+
+    wanted: set[str] = set()
+    for spec in servers.values():
+        for value in ((spec or {}).get("env") or {}).values():
+            if isinstance(value, str):
+                wanted.update(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", value))
+        for value in ((spec or {}).get("headers") or {}).values():
+            if isinstance(value, str):
+                wanted.update(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", value))
+    if not wanted:
+        return {}
+
+    resolved: dict[str, str] = {}
+    for name in wanted:
+        current = os.environ.get(name)
+        if current:
+            resolved[name] = current
+
+    missing = wanted - set(resolved)
+    if missing:
+        # The profile .env is where Hermes keeps these, mode 600. Read only the
+        # names the MCP specs actually asked for: never sweep the whole file.
+        home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        profile = (os.environ.get("HERMES_PROFILE") or "").strip()
+        if not profile:
+            try:
+                with open(os.path.join(home, "active_profile"), encoding="utf-8") as handle:
+                    profile = handle.read().strip()
+            except OSError:
+                profile = ""
+        # The default profile keeps its .env at HERMES_HOME; named profiles under
+        # profiles/<name>/. Same layout iac/ai-memory-mcp.sh relies on.
+        env_path = (
+            os.path.join(home, "profiles", profile, ".env")
+            if profile and profile != "default"
+            else os.path.join(home, ".env")
+        )
+        if env_path and os.path.isfile(env_path):
+            try:
+                with open(env_path, encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        key, _, value = line.partition("=")
+                        key = key.strip().removeprefix("export ").strip()
+                        if key in missing:
+                            resolved[key] = value.strip().strip('"').strip("'")
+            except OSError:
+                logger.debug("claude_code_cli: could not read the profile .env", exc_info=True)
+
+    still_missing = sorted(wanted - set(resolved))
+    if still_missing:
+        # Name them, never their values: a server that will fail to connect is
+        # worth saying out loud instead of surfacing as "tool not available".
+        logger.warning(
+            "claude_code_cli: MCP env unresolved, those servers will not connect: %s",
+            ", ".join(still_missing),
+        )
+    return resolved
+
+
+def _profile_mcp_servers(agent) -> dict:
+    """Read the MCP servers from the ACTIVE PROFILE config.
+
+    An earlier version read `agent.mcp_servers`, an attribute that does not
+    exist: the lane silently got no servers, the model was told about no tools,
+    and a turn asking for Paperclip answered "I could try an equivalent probe
+    via Bash". Hermes keeps them in the profile config — same source
+    `agent/coding_context.py:705` reads — and only enabled ones count.
+    """
+    override = getattr(agent, "mcp_servers", None)
+    if isinstance(override, dict) and override:
+        return override
+    try:
+        from hermes_cli.config import read_raw_config
+        from hermes_cli.tools_config import _parse_enabled_flag
+
+        servers = read_raw_config().get("mcp_servers") or {}
+    except Exception:  # noqa: BLE001
+        logger.debug("claude_code_cli: could not read profile mcp_servers", exc_info=True)
+        return {}
+    if not isinstance(servers, dict):
+        return {}
+    return {
+        name: spec
+        for name, spec in servers.items()
+        if isinstance(spec, dict)
+        and _parse_enabled_flag(spec.get("enabled", True), default=True)
+    }
+
+
 def _mcp_config_from_profile(agent) -> Optional[str]:
     """Translate Hermes' configured MCP servers into a Claude CLI mcp-config.
 
@@ -129,8 +235,8 @@ def _mcp_config_from_profile(agent) -> Optional[str]:
     import os
     import tempfile
 
-    servers = getattr(agent, "mcp_servers", None)
-    if not isinstance(servers, dict) or not servers:
+    servers = _profile_mcp_servers(agent)
+    if not servers:
         return None
 
     translated: dict[str, Any] = {}
@@ -142,8 +248,20 @@ def _mcp_config_from_profile(agent) -> Optional[str]:
                 "command": spec["command"],
                 "args": list(spec.get("args") or []),
             }
-            if isinstance(spec.get("env"), dict):
-                entry["env"] = dict(spec["env"])
+            # Env is deliberately NOT copied when it holds ${VAR} references.
+            # The CLI does not expand them, so the server would receive the
+            # literal string and fail to authenticate. Expanding them here
+            # would write real credentials into a temp file, which this product
+            # forbids. The MCP server is spawned BY the CLI, which inherits our
+            # process environment, so resolved values reach it by inheritance —
+            # no secret is ever serialised.
+            literal_env = {
+                key: value
+                for key, value in (spec.get("env") or {}).items()
+                if isinstance(value, str) and "${" not in value
+            }
+            if literal_env:
+                entry["env"] = literal_env
         elif spec.get("url"):
             # Claude Code speaks http/sse MCP; Hermes stores the URL plus any
             # headers, which is where the ai-memory bearer lives. The value is
@@ -171,9 +289,7 @@ def _mcp_config_from_profile(agent) -> Optional[str]:
 def _allowed_mcp_tools(agent) -> list[str]:
     """The exact tool names the lane may call, in Claude's mcp__ namespace."""
     names: list[str] = []
-    servers = getattr(agent, "mcp_servers", None) or {}
-    if not isinstance(servers, dict):
-        return names
+    servers = _profile_mcp_servers(agent)
     for server, spec in servers.items():
         include = ((spec or {}).get("tools") or {}).get("include") or []
         for tool in include:
@@ -233,8 +349,10 @@ def run_claude_code_turn(
         # One session per AIAgent, reused across turns: the CLI keeps context
         # between turns in the same process, which is why this transport is
         # session-persistent rather than process-per-turn.
+        mcp_servers = _profile_mcp_servers(agent)
         mcp_config = _mcp_config_from_profile(agent)
         mcp_tools = _allowed_mcp_tools(agent)
+        mcp_env = _resolve_mcp_env(mcp_servers)
         # The tool surface must carry the MCP tools explicitly: an empty or
         # Bash-only surface makes the orchestrator unable to touch Paperclip.
         tools = ",".join(["Bash", "Read", "Write", "Edit", *mcp_tools]) or "Bash"
@@ -245,6 +363,7 @@ def run_claude_code_turn(
             tools=tools,
             model=getattr(agent, "model", None),
             mcp_config=mcp_config,
+            env=mcp_env or None,
             policy=make_claude_approval_bridge(agent),
             register_hook=True,
         )

@@ -391,6 +391,72 @@ def test_no_mcp_servers_yields_no_config():
 
     assert _mcp_config_from_profile(type("A", (), {})()) is None
 
+def test_per_run_env_is_resolved_for_mcp_servers():
+    # As credenciais do Paperclip sao POR EXECUCAO: PAPERCLIP_RUN_ID e o JWT da
+    # run so existem dentro de uma run real, injetados pelo launcher. Nao estao
+    # no .env do perfil nem no ambiente fora dela — por desenho.
+    # MEDIDO: com o env por run presente, o servidor sobe (status=connected) e
+    # 40 tools MCP ficam expostas; sem ele, status=failed.
+    import os
+
+    from agent.claude_code_runtime import _resolve_mcp_env
+
+    servers = {
+        "paperclip": {
+            "command": "node",
+            "env": {"PAPERCLIP_API_KEY": "${PAPERCLIP_API_KEY}",
+                    "PAPERCLIP_RUN_ID": "${PAPERCLIP_RUN_ID}"},
+            "tools": {"include": []},
+        }
+    }
+    os.environ["PAPERCLIP_API_KEY"] = "jwt-de-teste"
+    os.environ["PAPERCLIP_RUN_ID"] = "run-teste"
+    try:
+        resolved = _resolve_mcp_env(servers)
+    finally:
+        os.environ.pop("PAPERCLIP_API_KEY", None)
+        os.environ.pop("PAPERCLIP_RUN_ID", None)
+    assert resolved["PAPERCLIP_API_KEY"] == "jwt-de-teste"
+    assert resolved["PAPERCLIP_RUN_ID"] == "run-teste"
+
+
+def test_unresolved_env_is_reported_not_swallowed():
+    # Um servidor que NAO vai conectar precisa ser dito em voz alta: sem isto o
+    # sintoma chega ao usuario como "a ferramenta nao esta disponivel", que
+    # manda procurar no lugar errado. MEDIDO: foi essa mensagem que localizou a
+    # causa desta lacuna.
+    import logging
+
+    from agent.claude_code_runtime import _resolve_mcp_env
+
+    servers = {"x": {"command": "true", "env": {"K": "${NAO_EXISTE_ABC}"}, "tools": {"include": []}}}
+    logger = logging.getLogger("agent.claude_code_runtime")
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logger.addHandler(handler)
+    try:
+        _resolve_mcp_env(servers)
+    finally:
+        logger.removeHandler(handler)
+    assert any("NAO_EXISTE_ABC" in r.getMessage() for r in records)
+
+
+def test_secrets_never_reach_the_mcp_config_file():
+    # O env resolvido vai para o AMBIENTE do processo filho, nunca para o
+    # arquivo: um arquivo em disco seria segredo materializado.
+    import json
+
+    from agent.claude_code_runtime import _mcp_config_from_profile
+
+    agent = type("A", (), {"mcp_servers": {
+        "paperclip": {"command": "node",
+                      "env": {"PAPERCLIP_API_KEY": "${PAPERCLIP_API_KEY}"},
+                      "tools": {"include": []}}}})()
+    raw = open(_mcp_config_from_profile(agent)).read()
+    assert "PAPERCLIP_API_KEY" not in raw or "${" in raw
+    assert "jwt" not in raw.lower()
+
 
 def main() -> int:
     tests = [(n, o) for n, o in sorted(globals().items())
