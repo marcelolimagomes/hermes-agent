@@ -2074,6 +2074,23 @@ def resolve_runtime_provider(
                 "requested_provider": requested_provider,
             }
 
+    if provider == "claude-code-cli":
+        # Provider conduzido por CLI local (ADR-020). O api_mode e
+        # claude_code_cli, NUNCA anthropic_messages: aquele caminho iria para a
+        # API nativa, que e exatamente o proibido. Sem este ramo o provider cai
+        # no fallback e a lane vai parar em outro fornecedor em silencio.
+        creds = resolve_external_process_provider_credentials(provider)
+        return {
+            "provider": "claude-code-cli",
+            "api_mode": "claude_code_cli",
+            "base_url": creds.get("base_url", "").rstrip("/"),
+            "api_key": creds.get("api_key", ""),
+            "command": creds.get("command", ""),
+            "args": list(creds.get("args") or []),
+            "source": creds.get("source", "process"),
+            "requested_provider": requested_provider,
+        }
+
     if provider == "copilot-acp":
         creds = resolve_external_process_provider_credentials(provider)
         return {

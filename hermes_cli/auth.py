@@ -7347,6 +7347,38 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
     if not base_url:
         base_url = pconfig.inference_base_url
 
+    # This resolver used to hardcode the Copilot CLI for EVERY external-process
+    # provider: a second one resolved `copilot`, failed to find it, and the
+    # caller silently fell back to another provider. Branch per provider.
+    if provider_id == "claude-code-cli":
+        command = (
+            os.getenv("HERMES_CLAUDE_CODE_COMMAND", "").strip()
+            or os.getenv("CLAUDE_CLI_PATH", "").strip()
+            or "claude"
+        )
+        raw_args = os.getenv("HERMES_CLAUDE_CODE_ARGS", "").strip()
+        # The transport builds the real argv (agent/transports/claude_code_session.py),
+        # which is where the barrier-removing flags are refused. Nothing extra here.
+        args = shlex.split(raw_args) if raw_args else []
+        resolved_command = shutil.which(command) if command else None
+        if not resolved_command:
+            raise AuthError(
+                f"Could not find the Claude Code CLI command '{command}'. "
+                "Install Claude Code or set HERMES_CLAUDE_CODE_COMMAND/CLAUDE_CLI_PATH.",
+                provider=provider_id,
+                code="missing_claude_cli",
+            )
+        return {
+            "provider": provider_id,
+            # Marker, not a secret: this provider authenticates through the
+            # CLI's own credential store, never through an API key here.
+            "api_key": "claude-code-cli",
+            "base_url": base_url.rstrip("/"),
+            "command": resolved_command,
+            "args": args,
+            "source": "process",
+        }
+
     command = (
         os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
         or os.getenv("COPILOT_CLI_PATH", "").strip()

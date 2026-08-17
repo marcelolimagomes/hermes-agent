@@ -322,6 +322,34 @@ def test_provider_never_falls_through_to_the_native_api():
     assert "anthropic_messages" not in code
 
 
+def test_external_process_resolver_is_provider_aware():
+    # Este resolver era hardcoded para o Copilot: um SEGUNDO provider
+    # external_process resolvia o binario `copilot`, nao encontrava, e o
+    # chamador caia em outro fornecedor EM SILENCIO. Medido: a lane ia parar
+    # em openrouter.
+    from hermes_cli.auth import resolve_external_process_provider_credentials
+
+    creds = resolve_external_process_provider_credentials("claude-code-cli")
+    assert creds["provider"] == "claude-code-cli"
+    assert creds["command"].endswith("claude")
+    assert creds["source"] == "process"
+
+
+def test_provider_routing_never_yields_anthropic_messages():
+    # O roteamento tem de devolver claude_code_cli. anthropic_messages levaria
+    # o turno para a API nativa, proibida pelo ADR-020.
+    import inspect
+
+    from hermes_cli import runtime_provider
+
+    src = inspect.getsource(runtime_provider)
+    idx = src.index('if provider == "claude-code-cli":')
+    branch = src[idx: idx + 700]
+    code = "\n".join(l for l in branch.splitlines() if not l.strip().startswith("#"))
+    assert '"api_mode": "claude_code_cli"' in code
+    assert "anthropic_messages" not in code.split('if provider == "copilot-acp"')[0]
+
+
 def main() -> int:
     tests = [(n, o) for n, o in sorted(globals().items())
              if n.startswith("test_") and callable(o)]
