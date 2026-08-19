@@ -664,6 +664,36 @@ def _env_flag_true(raw: Optional[str]) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _host_without_port(host_header: str) -> str:
+    """Return a normalized host name without an optional port suffix."""
+    h = host_header.strip()
+    if h.startswith("["):
+        close = h.find("]")
+        if close != -1:
+            return h[1:close].lower()
+        return h.strip("[]").lower()
+    return (h.rsplit(":", 1)[0] if ":" in h else h).lower()
+
+
+def _trusted_proxy_hosts() -> frozenset:
+    """Return explicitly configured reverse-proxy Host aliases.
+
+    Loopback remains the bind boundary. This narrow allowlist exists for a
+    local reverse proxy/tunnel that preserves the public hostname while
+    forwarding to the loopback dashboard. It is opt-in and never accepts a
+    wildcard.
+    """
+    raw = os.environ.get("HERMES_DASHBOARD_TRUSTED_PROXY_HOSTS", "")
+    hosts = {
+        _host_without_port(value)
+        for value in raw.split(",")
+        if value.strip()
+    }
+    return frozenset(
+        host for host in hosts if host and host not in {"*", "0.0.0.0", "::"}
+    )
+
+
 def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     """True if the Host header targets the interface we bound to.
 
@@ -702,7 +732,12 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
-        return host_only in _LOOPBACK_HOST_VALUES
+        # O alias de proxy declarado entra aqui junto dos nomes de loopback.
+        # Sem isso, um tunel que preserva o hostname publico e encaminha para o
+        # bind loopback e recusado -- e o `Origin` do WebSocket, que o navegador
+        # controla e nenhum proxy pode reescrever, torna a recusa fatal: o chat
+        # fecha com 1006 em laco. Continua opt-in e sem curinga.
+        return host_only in (_LOOPBACK_HOST_VALUES | _trusted_proxy_hosts())
 
     # Explicit non-loopback bind: require exact host match
     return host_only == bound_lc

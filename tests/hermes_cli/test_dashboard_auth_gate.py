@@ -252,3 +252,45 @@ def test_force_auth_absent_is_the_documented_default(monkeypatch):
     monkeypatch.delenv("HERMES_DASHBOARD_FORCE_AUTH", raising=False)
     assert should_require_auth("127.0.0.1") is False
     assert should_require_auth("0.0.0.0") is True
+
+
+# ---------------------------------------------------------------------------
+# HERMES_DASHBOARD_TRUSTED_PROXY_HOSTS — o alias que o Origin do WS exige
+# ---------------------------------------------------------------------------
+# O fork tinha o env var documentado e NAO lido: `_is_accepted_host` so aceitava
+# nomes de loopback. Com um tunel na frente, o `Host` da para reescrever, mas o
+# `Origin` do WebSocket e' do navegador -- o chat fechava com 1006 em laco.
+
+
+def test_trusted_proxy_host_is_accepted_on_a_loopback_bind(monkeypatch):
+    from hermes_cli.web_server import _is_accepted_host
+
+    monkeypatch.setenv("HERMES_DASHBOARD_TRUSTED_PROXY_HOSTS", "hermes.example.com")
+    assert _is_accepted_host("hermes.example.com", "127.0.0.1") is True
+    assert _is_accepted_host("hermes.example.com:443", "127.0.0.1") is True
+    assert _is_accepted_host("127.0.0.1:9119", "127.0.0.1") is True
+
+
+def test_a_host_outside_the_allowlist_is_still_refused(monkeypatch):
+    """The allowlist widens by exactly what the operator names, nothing more."""
+    from hermes_cli.web_server import _is_accepted_host
+
+    monkeypatch.setenv("HERMES_DASHBOARD_TRUSTED_PROXY_HOSTS", "hermes.example.com")
+    for hostile in ("evil.example.com", "hermes.example.com.evil.net", "attacker"):
+        assert _is_accepted_host(hostile, "127.0.0.1") is False
+
+
+@pytest.mark.parametrize("wildcard", ["*", "0.0.0.0", "::"])
+def test_a_wildcard_entry_never_disables_the_guard(monkeypatch, wildcard):
+    from hermes_cli.web_server import _is_accepted_host
+
+    monkeypatch.setenv("HERMES_DASHBOARD_TRUSTED_PROXY_HOSTS", wildcard)
+    assert _is_accepted_host("evil.example.com", "127.0.0.1") is False
+
+
+def test_absent_allowlist_keeps_the_previous_behaviour(monkeypatch):
+    from hermes_cli.web_server import _is_accepted_host
+
+    monkeypatch.delenv("HERMES_DASHBOARD_TRUSTED_PROXY_HOSTS", raising=False)
+    assert _is_accepted_host("hermes.example.com", "127.0.0.1") is False
+    assert _is_accepted_host("localhost:9119", "127.0.0.1") is True
