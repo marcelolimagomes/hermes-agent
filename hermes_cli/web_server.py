@@ -632,7 +632,36 @@ def should_require_auth(host: str, allow_public: bool = False) -> bool:
     MCP-persistence campaign, where ``--insecure --host 0.0.0.0`` left the
     config/MCP/agent surface open to internet scanners.
     """
+    if _force_auth_env_set():
+        return True
     return host not in _LOOPBACK_HOST_VALUES
+
+
+def _force_auth_env_set() -> bool:
+    """True when the operator has explicitly demanded the gate, bind aside.
+
+    The host heuristic above answers "is this socket reachable by someone other
+    than the local operator?" by looking at the bind address. A reverse proxy or
+    tunnel breaks that inference: cloudflared, ngrok and friends terminate a
+    public hostname and forward to 127.0.0.1, so the socket is loopback and the
+    dashboard is on the internet. The predicate cannot see the tunnel and
+    happily serves loopback mode — which does not merely skip the login page, it
+    injects the session token into the SPA HTML, publishing the credential to
+    whoever loads the page.
+
+    This override exists for that topology. It is deliberately one-directional:
+    it can only ever turn the gate ON. There is no value of this variable that
+    disables auth, so no misconfiguration of it can widen the surface — the same
+    reason ``allow_public`` was neutered after ``hermes-0day``.
+    """
+    return _env_flag_true(os.environ.get("HERMES_DASHBOARD_FORCE_AUTH"))
+
+
+def _env_flag_true(raw: Optional[str]) -> bool:
+    """Truthy parse for operator-facing env flags."""
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_accepted_host(host_header: str, bound_host: str) -> bool:

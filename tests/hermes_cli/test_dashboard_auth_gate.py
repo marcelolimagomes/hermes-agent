@@ -203,3 +203,52 @@ def test_start_server_gate_with_provider_proceeds_and_sets_proxy_headers(monkeyp
         clear_providers()
 
 
+
+
+# ---------------------------------------------------------------------------
+# HERMES_DASHBOARD_FORCE_AUTH — the tunnel topology the bind cannot see
+# ---------------------------------------------------------------------------
+# A tunnel (cloudflared, ngrok) terminates a public hostname and forwards to
+# 127.0.0.1, so the bind says "loopback" while the dashboard is on the
+# internet. In loopback mode the SPA HTML carries the session token, so that
+# misread publishes the credential. These tests pin the override's contract.
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes", "on", " on "])
+def test_force_auth_engages_the_gate_on_a_loopback_bind(monkeypatch, raw):
+    from hermes_cli.web_server import should_require_auth
+
+    monkeypatch.setenv("HERMES_DASHBOARD_FORCE_AUTH", raw)
+    for host in ("127.0.0.1", "localhost", "::1"):
+        assert should_require_auth(host) is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", "", "  ", "maybe"])
+def test_force_auth_falsy_leaves_the_bind_heuristic_alone(monkeypatch, raw):
+    from hermes_cli.web_server import should_require_auth
+
+    monkeypatch.setenv("HERMES_DASHBOARD_FORCE_AUTH", raw)
+    assert should_require_auth("127.0.0.1") is False
+    assert should_require_auth("0.0.0.0") is True
+
+
+def test_force_auth_can_never_disable_the_gate(monkeypatch):
+    """The override is one-directional: no value of it turns auth OFF.
+
+    This is the property that makes the flag safe to expose. A typo can cost
+    us a login page; it must never cost us the gate on a public bind.
+    """
+    from hermes_cli.web_server import should_require_auth
+
+    for raw in ("0", "false", "off", "no", "", "1", "true", "on", "garbage"):
+        monkeypatch.setenv("HERMES_DASHBOARD_FORCE_AUTH", raw)
+        assert should_require_auth("0.0.0.0") is True
+        assert should_require_auth("192.168.1.5", allow_public=True) is True
+
+
+def test_force_auth_absent_is_the_documented_default(monkeypatch):
+    from hermes_cli.web_server import should_require_auth
+
+    monkeypatch.delenv("HERMES_DASHBOARD_FORCE_AUTH", raising=False)
+    assert should_require_auth("127.0.0.1") is False
+    assert should_require_auth("0.0.0.0") is True
