@@ -75,8 +75,13 @@ class _BackgroundLoop:
         self._ready = threading.Event()
 
     def start(self) -> None:
-        if self._thread is not None:
+        # Uma thread morta nao vale como thread viva. Antes esta guarda era
+        # `is not None`, entao depois que o loop morria -- ou depois de stop(),
+        # que deixava `_thread` preenchido -- start() virava no-op e o
+        # `_BackgroundLoop` ficava permanentemente inutil.
+        if self._thread is not None and self._thread.is_alive():
             return
+        self._ready.clear()
         self._thread = threading.Thread(
             target=self._run_forever,
             name="hermes-lsp-loop",
@@ -92,11 +97,29 @@ class _BackgroundLoop:
         self._ready.set()
         try:
             loop.run_forever()
+        except BaseException:  # noqa: BLE001
+            # `run_forever()` estava sem guarda, e o selector do asyncio levanta
+            # OSError EBADF quando um descritor que ele observa e' fechado por
+            # baixo dele. A excecao escapava do alvo da thread, o CPython
+            # imprimia "Exception in thread hermes-lsp-loop" no stderr, e quem
+            # lesse esse stderr -- o Paperclip le -- reportava a run inteira
+            # como falha, mesmo com o processo saindo com codigo 0.
+            #
+            # Registrado, nunca silencioso: o loop morre de qualquer forma, mas
+            # morre de forma diagnosticavel e recuperavel em vez de derrubar o
+            # turno com um traceback solto.
+            logger.warning("hermes-lsp-loop terminou por excecao", exc_info=True)
         finally:
             try:
                 loop.close()
             except Exception:  # noqa: BLE001
                 pass
+            # Solta as referencias para que start() consiga recriar o loop. Sem
+            # isto, `_loop` seguiria apontando para um loop fechado e todo
+            # `run()` posterior bloquearia ate o timeout contra um loop que
+            # ninguem esta rodando.
+            if self._loop is loop:
+                self._loop = None
 
     def run(self, coro, *, timeout: Optional[float] = None) -> Any:
         """Submit a coroutine to the loop and block until done.
@@ -127,6 +150,7 @@ class _BackgroundLoop:
             pass
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        self._thread = None
         self._loop = None
         self._thread = None
 
